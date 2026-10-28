@@ -1,0 +1,57 @@
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: rutasur-kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:29092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    container_name: rutasur-kafka-init
+    depends_on:
+      - kafka
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "sleep 10 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic envios.estados --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic envios.promesas --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic envios.reprogramaciones --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic alertas.sla --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic notificaciones.enviadas --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1 &&
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists --topic envios.estados.dlq --bootstrap-server kafka:9092 --partitions 3 --replication-factor 1"
+
+  mongo:
+    image: mongo:8
+    container_name: rutasur-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: rutasur-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: rutasur
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+volumes:
+  mongo_data:
