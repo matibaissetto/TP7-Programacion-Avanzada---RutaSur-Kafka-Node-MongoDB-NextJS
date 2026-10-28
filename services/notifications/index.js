@@ -3,7 +3,7 @@ const { randomUUID } = require('crypto');
 
 const kafka = new Kafka({
   clientId: 'rutasur-notifications',
-  brokers: ['localhost:29092'],
+  brokers: [process.env.KAFKA_BROKER ?? 'localhost:29092'],
 });
 
 const consumer = kafka.consumer({

@@ -1,103 +1,184 @@
 const { Kafka } = require('kafkajs');
+const { MongoClient } = require('mongodb');
 const { randomUUID } = require('crypto');
 
 const kafka = new Kafka({
   clientId: 'rutasur-sla-monitor',
-  brokers: ['localhost:29092'],
+  brokers: [process.env.KAFKA_BROKER ?? 'localhost:29092'],
 });
 
 const consumer = kafka.consumer({
-  groupId: 'monitor-sla',
+  groupId: 'monitor-sla-v2',
 });
 
 const producer = kafka.producer();
 
-const envios = new Map();
-const alertasEmitidas = new Set();
+const mongoUri =
+  process.env.MONGO_URI ??
+  (process.env.KAFKA_BROKER
+    ? 'mongodb://mongo:27017'
+    : 'mongodb://localhost:27017');
 
-function obtenerEstado(shipmentId) {
-  if (!envios.has(shipmentId)) {
-    envios.set(shipmentId, {
-      shipmentId,
-      estado: null,
-      venceEn: null,
-    });
-  }
+const mongo = new MongoClient(mongoUri);
 
-  return envios.get(shipmentId);
-}
+async function emitirAlerta(db, shipmentId, tipo, severidad, detalle) {
+  const alertas = db.collection('alertas');
 
-async function emitirAlerta(envio, regla, prioridad) {
-  const clave = `${envio.shipmentId}-${regla}`;
+  const existente = await alertas.findOne({
+    shipmentId,
+    tipo,
+    estado: 'ABIERTA',
+  });
 
-  if (alertasEmitidas.has(clave)) {
-    return;
-  }
-
-  alertasEmitidas.add(clave);
+  if (existente) return;
 
   const alerta = {
     eventId: randomUUID(),
-    shipmentId: envio.shipmentId,
-    tipo: 'ALERTA_SLA',
-    regla,
-    prioridad,
+    shipmentId,
+    tipo,
+    severidad,
+    detalle,
+    estado: 'ABIERTA',
     ocurridoEn: new Date().toISOString(),
     version: 1,
   };
+
+  await alertas.insertOne({
+    ...alerta,
+    creadaEn: new Date(),
+  });
 
   await producer.send({
     topic: 'alertas.sla',
     messages: [
       {
-        key: envio.shipmentId,
+        key: shipmentId,
         value: JSON.stringify(alerta),
       },
     ],
   });
 
   console.log(
-    `${envio.shipmentId} -> ALERTA SLA -> ${regla} -> ${prioridad}`,
+    `${shipmentId} -> ALERTA SLA -> ${tipo} -> ${severidad}`
   );
 }
 
-async function evaluar(envio) {
-  if (!envio.venceEn || envio.estado === 'ENTREGADO') {
+async function cerrarAlertas(db, shipmentId) {
+  await db.collection('alertas').updateMany(
+    {
+      shipmentId,
+      estado: 'ABIERTA',
+    },
+    {
+      $set: {
+        estado: 'CERRADA',
+        cerradaEn: new Date(),
+      },
+    }
+  );
+
+  console.log(`${shipmentId} -> alertas SLA cerradas`);
+}
+
+async function evaluar(db, shipmentId) {
+  const slaEnvios = db.collection('sla_envios');
+
+  const envio = await slaEnvios.findOne({
+    shipmentId,
+  });
+
+  if (!envio || !envio.venceEn) return;
+
+  if (envio.estado === 'ENTREGADO') {
+    await cerrarAlertas(db, shipmentId);
     return;
   }
 
   const ahora = Date.now();
   const vence = new Date(envio.venceEn).getTime();
-  const horas = (vence - ahora) / 3600000;
 
-  if (horas < 0) {
-    await emitirAlerta(envio, 'VENCIDO', 'CRITICA');
-    return;
+  const horasRestantes =
+    (vence - ahora) / (1000 * 60 * 60);
+
+  if (
+    horasRestantes < 0 &&
+    envio.estado !== 'ENTREGADO'
+  ) {
+    await emitirAlerta(
+      db,
+      shipmentId,
+      'VENCIDO',
+      'CRITICA',
+      'La promesa de entrega se encuentra vencida.'
+    );
   }
 
   if (
-    horas < 4 &&
-    envio.estado !== 'EN_REPARTO'
+    horasRestantes >= 0 &&
+    horasRestantes < 4 &&
+    envio.estado !== 'EN_REPARTO' &&
+    envio.estado !== 'ENTREGADO'
   ) {
-    await emitirAlerta(envio, 'SIN_SALIDA', 'ALTA');
+    await emitirAlerta(
+      db,
+      shipmentId,
+      'SIN_SALIDA',
+      'ALTA',
+      'Faltan menos de 4 horas y el envío no está en reparto.'
+    );
   }
 
   if (
-    horas < 10 &&
-    !['INGRESADO_HUB', 'CLASIFICADO', 'EN_REPARTO'].includes(envio.estado)
+    horasRestantes >= 0 &&
+    horasRestantes < 10 &&
+    ![
+      'INGRESADO_HUB',
+      'CLASIFICADO',
+      'EN_REPARTO',
+      'ENTREGADO',
+    ].includes(envio.estado)
   ) {
-    await emitirAlerta(envio, 'SIN_INGRESO', 'MEDIA');
+    await emitirAlerta(
+      db,
+      shipmentId,
+      'SIN_INGRESO',
+      'MEDIA',
+      'Faltan menos de 10 horas y el envío no ingresó al hub.'
+    );
   }
 
   if (
     envio.estado === 'ENTREGA_FALLIDA' &&
-    new Date(envio.venceEn).toDateString() === new Date().toDateString()
+    new Date(envio.venceEn).toDateString() ===
+      new Date().toDateString()
   ) {
-    await emitirAlerta(envio, 'FALLO_DIA_LIMITE', 'ALTA');
+    await emitirAlerta(
+      db,
+      shipmentId,
+      'FALLO_DIA_LIMITE',
+      'ALTA',
+      'La entrega falló el día límite.'
+    );
   }
 }
 
 async function main() {
+  await mongo.connect();
+
+  const db = mongo.db('rutasur');
+  const slaEnvios = db.collection('sla_envios');
+
+  await slaEnvios.createIndex(
+    { shipmentId: 1 },
+    { unique: true }
+  );
+
+  await db.collection('alertas').createIndex({
+    shipmentId: 1,
+    tipo: 1,
+    estado: 1,
+  });
+
   await consumer.connect();
   await producer.connect();
 
@@ -106,31 +187,67 @@ async function main() {
     fromBeginning: true,
   });
 
-  console.log('SLA Monitor escuchando estados y promesas...');
+  console.log(
+    'SLA Monitor escuchando estados y promesas...'
+  );
 
   await consumer.run({
     eachMessage: async ({ topic, message }) => {
-      const event = JSON.parse(message.value.toString());
+      const event = JSON.parse(
+        message.value.toString()
+      );
 
-      const envio = obtenerEstado(event.shipmentId);
+      if (!event.shipmentId) return;
 
       if (topic === 'envios.promesas') {
-        envio.venceEn = event.venceEn;
+        await slaEnvios.updateOne(
+          { shipmentId: event.shipmentId },
+          {
+            $set: {
+              shipmentId: event.shipmentId,
+              venceEn: event.venceEn,
+              actualizadoEn: new Date(),
+            },
+          },
+          { upsert: true }
+        );
       }
 
       if (topic === 'envios.estados') {
-        envio.estado = event.tipo;
+        await slaEnvios.updateOne(
+          { shipmentId: event.shipmentId },
+          {
+            $set: {
+              shipmentId: event.shipmentId,
+              estado: event.tipo,
+              motivo: event.motivo ?? null,
+              actualizadoEn: new Date(),
+            },
+          },
+          { upsert: true }
+        );
       }
 
-      await evaluar(envio);
+      await evaluar(db, event.shipmentId);
     },
   });
 
   setInterval(async () => {
-    for (const envio of envios.values()) {
-      await evaluar(envio);
+    const envios = await slaEnvios
+      .find({
+        estado: {
+          $ne: 'ENTREGADO',
+        },
+      })
+      .toArray();
+
+    for (const envio of envios) {
+      await evaluar(db, envio.shipmentId);
     }
   }, 60000);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

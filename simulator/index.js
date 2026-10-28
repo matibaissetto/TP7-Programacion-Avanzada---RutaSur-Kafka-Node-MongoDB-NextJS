@@ -3,7 +3,7 @@ const { randomUUID } = require('crypto');
 
 const kafka = new Kafka({
   clientId: 'rutasur-simulator',
-  brokers: ['localhost:29092'],
+  brokers: [process.env.KAFKA_BROKER ?? 'localhost:29092'],
 });
 
 const producer = kafka.producer();
@@ -38,7 +38,7 @@ async function publicar(topic, data) {
   });
 
   console.log(
-    `${topic} -> ${data.tipo ?? 'INVALIDO'} -> ${data.shipmentId ?? '-'}`,
+    `${topic} -> ${data.tipo ?? 'INVALIDO'} -> ${data.shipmentId ?? '-'}`
   );
 }
 
@@ -50,7 +50,7 @@ async function publicarPromesa(shipmentId, horas = 24) {
     ocurridoEn: new Date().toISOString(),
     secuencia: 0,
     venceEn: new Date(
-      Date.now() + horas * 3600000,
+      Date.now() + horas * 3600000
     ).toISOString(),
     version: 1,
   });
@@ -72,7 +72,7 @@ async function envioFeliz() {
   for (let i = 0; i < estados.length; i++) {
     await publicar(
       'envios.estados',
-      evento(shipmentId, estados[i], i + 1),
+      evento(shipmentId, estados[i], i + 1)
     );
 
     await sleep(300);
@@ -96,7 +96,7 @@ async function envioAusente() {
   for (let i = 0; i < estados.length; i++) {
     await publicar(
       'envios.estados',
-      evento(shipmentId, estados[i], i + 1),
+      evento(shipmentId, estados[i], i + 1)
     );
 
     await sleep(300);
@@ -108,7 +108,7 @@ async function envioAusente() {
       motivo: 'AUSENTE',
       intentos: 1,
       franja: 'MANANA',
-    }),
+    })
   );
 
   console.log(`Escenario AUSENTE terminado: ${shipmentId}`);
@@ -121,12 +121,12 @@ async function tercerFallo() {
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'CREADO', 1),
+    evento(shipmentId, 'CREADO', 1)
   );
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'EN_REPARTO', 2),
+    evento(shipmentId, 'EN_REPARTO', 2)
   );
 
   await publicar(
@@ -135,7 +135,7 @@ async function tercerFallo() {
       motivo: 'AUSENTE',
       intentos: 3,
       franja: 'TARDE',
-    }),
+    })
   );
 
   console.log(`Escenario TERCER FALLO terminado: ${shipmentId}`);
@@ -148,12 +148,12 @@ async function demorado() {
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'CREADO', 1),
+    evento(shipmentId, 'CREADO', 1)
   );
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'INGRESADO_HUB', 2),
+    evento(shipmentId, 'INGRESADO_HUB', 2)
   );
 
   console.log(`Escenario DEMORADO creado: ${shipmentId}`);
@@ -173,20 +173,67 @@ async function fueraDeOrden() {
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'CREADO', 1),
+    evento(shipmentId, 'CREADO', 1)
   );
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'EN_REPARTO', 3),
+    evento(shipmentId, 'EN_REPARTO', 3)
   );
 
   await publicar(
     'envios.estados',
-    evento(shipmentId, 'CLASIFICADO', 2),
+    evento(shipmentId, 'CLASIFICADO', 2)
   );
 
   console.log(`Evento fuera de orden enviado: ${shipmentId}`);
+}
+
+async function burst() {
+  const cantidad = 25;
+
+  console.log(`Iniciando BURST de ${cantidad} envíos...`);
+
+  const promesas = [];
+
+  for (let i = 0; i < cantidad; i++) {
+    promesas.push(
+      (async () => {
+        const shipmentId = `BURST-${Date.now()}-${i}`;
+
+        await publicarPromesa(shipmentId);
+
+        await publicar(
+          'envios.estados',
+          evento(shipmentId, 'CREADO', 1)
+        );
+
+        await publicar(
+          'envios.estados',
+          evento(shipmentId, 'INGRESADO_HUB', 2)
+        );
+
+        await publicar(
+          'envios.estados',
+          evento(shipmentId, 'CLASIFICADO', 3)
+        );
+
+        await publicar(
+          'envios.estados',
+          evento(shipmentId, 'EN_REPARTO', 4)
+        );
+
+        await publicar(
+          'envios.estados',
+          evento(shipmentId, 'ENTREGADO', 5)
+        );
+      })()
+    );
+  }
+
+  await Promise.all(promesas);
+
+  console.log(`BURST terminado: ${cantidad} envíos procesados`);
 }
 
 async function main() {
@@ -206,6 +253,8 @@ async function main() {
     await invalido();
   } else if (escenario === 'fuera-orden') {
     await fueraDeOrden();
+  } else if (escenario === 'burst') {
+    await burst();
   } else {
     console.log('Escenario no reconocido');
   }
@@ -213,4 +262,7 @@ async function main() {
   await producer.disconnect();
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

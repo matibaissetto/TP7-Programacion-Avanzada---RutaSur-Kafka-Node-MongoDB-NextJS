@@ -37,10 +37,22 @@ services:
   mongo:
     image: mongo:8
     container_name: rutasur-mongo
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+
+  mongo-init:
+    image: mongo:8
+    container_name: rutasur-mongo-init
+    depends_on:
+      - mongo
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "sleep 5 &&
+      mongosh --host mongo:27017 --eval
+      \"try { rs.status() } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }\""
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -52,6 +64,80 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: rutasur
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  projector:
+    build: ./services/projector
+    container_name: rutasur-projector
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+
+  notifications:
+    build: ./services/notifications
+    container_name: rutasur-notifications
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+
+  rescheduling:
+    build: ./services/rescheduling
+    container_name: rutasur-rescheduling
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+
+  sla-monitor:
+    build: ./services/sla-monitor
+    container_name: rutasur-sla-monitor
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+
+  analytics:
+    build: ./services/analytics
+    container_name: rutasur-analytics
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+      MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
+
+  simulator:
+    build: ./simulator
+    container_name: rutasur-simulator
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_BROKER: kafka:9092
+
+  frontend:
+    build: ./frontend
+    container_name: rutasur-frontend
+    depends_on:
+      mongo-init:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    environment:
+      MONGO_URI: mongodb://mongo:27017/?replicaSet=rs0
 
 volumes:
   mongo_data:

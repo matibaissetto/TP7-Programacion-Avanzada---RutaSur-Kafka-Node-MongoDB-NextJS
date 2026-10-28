@@ -14,6 +14,7 @@ Sistema distribuido para seguimiento de envíos basado en arquitectura orientada
 - Docker
 - Docker Compose
 - Kafka UI
+- Server-Sent Events
 
 ## Componentes
 
@@ -36,9 +37,9 @@ Sistema distribuido para seguimiento de envíos basado en arquitectura orientada
 
 ## Funcionalidades implementadas
 
-### Ciclo de vida
+### Ciclo de vida de envíos
 
-Estados principales:
+Estados:
 
 - CREADO
 - INGRESADO_HUB
@@ -47,80 +48,100 @@ Estados principales:
 - ENTREGADO
 - ENTREGA_FALLIDA
 
-El projector consume los eventos y mantiene el estado actual y el historial de cada envío en MongoDB.
+El Projector mantiene en MongoDB el estado actual y el historial de cada envío.
+
+### Idempotencia y orden
+
+El sistema registra los `eventId` procesados.
+
+Los eventos duplicados se descartan y los eventos cuya secuencia es menor o igual a la última aplicada no modifican el estado.
+
+### DLQ
+
+Los eventos inválidos se publican en:
+
+`envios.estados.dlq`
 
 ### Entrega fallida
 
-Un evento `ENTREGA_FALLIDA` es procesado de forma independiente por:
+Un evento `ENTREGA_FALLIDA` es procesado independientemente por:
 
 - Notifications
 - Rescheduling
 - Analytics
 
-Para el motivo `AUSENTE` se genera una notificación y una reprogramación.
+Se contemplan los motivos:
+
+- AUSENTE
+- DIRECCION_INCORRECTA
+- RECHAZADO
+- ZONA_INACCESIBLE
 
 El tercer intento fallido genera devolución al comercio.
 
 ### SLA
 
-El monitor consume estados y promesas y contempla alertas:
+El monitor SLA evalúa eventos y periódicamente controla:
 
 - SIN_INGRESO
 - SIN_SALIDA
 - FALLO_DIA_LIMITE
 - VENCIDO
 
-### Idempotencia y orden
+Las alertas se persisten en MongoDB, no se repiten mientras estén abiertas y se cierran cuando el envío se entrega.
 
-El projector registra los `eventId` procesados.
+### Analytics
 
-Los eventos duplicados son descartados.
+Se calculan:
 
-Los eventos cuya secuencia es menor o igual a la última aplicada no modifican el estado del envío.
+- Tasa de entrega en primer intento
+- Distribución de motivos de fallo
+- Cumplimiento de SLA
 
-### DLQ
+También se realiza un replay para calcular el tiempo promedio entre `INGRESADO_HUB` y `EN_REPARTO` por hub.
 
-Los eventos inválidos son publicados en:
+### Frontend
 
-`envios.estados.dlq`
+La aplicación incluye:
+
+- Torre de control
+- Detalle completo del envío
+- Tracking público
+- Analítica
+- Panel demo
+
+El detalle muestra:
+
+- Historial
+- Notificaciones
+- Reprogramaciones
+- Alertas SLA
+
+La interfaz utiliza SSE y MongoDB Change Streams para actualizarse automáticamente.
 
 ## Escenarios del simulador
 
-Desde la carpeta `simulator`:
+- `feliz`
+- `ausente`
+- `tercer-fallo`
+- `demorado`
+- `invalido`
+- `fuera-orden`
+- `burst`
+
+Ejemplo:
 
 ```bash
-node index.js feliz
+docker compose run --rm simulator node index.js burst
 ```
+
+## Ejecución
+
+Todo el entorno se inicia con:
 
 ```bash
-node index.js ausente
+docker compose up -d --build
 ```
-
-```bash
-node index.js tercer-fallo
-```
-
-```bash
-node index.js demorado
-```
-
-```bash
-node index.js invalido
-```
-
-```bash
-node index.js fuera-orden
-```
-
-## Frontend
-
-La interfaz Next.js incluye:
-
-- Torre de control
-- Detalle del envío
-- Tracking público
-- Analítica
-- Panel de demo
 
 Frontend:
 
@@ -134,24 +155,8 @@ Kafka UI:
 http://localhost:8080
 ```
 
-## Infraestructura
-
-Levantar Kafka, MongoDB y Kafka UI:
+Para detener todo:
 
 ```bash
-docker compose up -d
-```
-
-## Ejecución de servicios
-
-Cada servicio Node.js puede iniciarse con:
-
-```bash
-node index.js
-```
-
-El frontend se inicia desde `frontend` con:
-
-```bash
-npm run dev
+docker compose down
 ```
